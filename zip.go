@@ -16,7 +16,6 @@ import (
 	szip "github.com/STARRY-S/zip"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/japanese"
-	"golang.org/x/text/encoding/korean"
 
 	"github.com/dsnet/compress/bzip2"
 	"github.com/klauspost/compress/zip"
@@ -128,73 +127,23 @@ func (z *Zip) AutoDetectEncoding(ctx context.Context, sr *io.SectionReader) enco
 	}
 
 	// Analyze filenames to detect encoding
-	var nonUTF8Names [][]byte
-	var allUTF8 = true
+	var hasNonUTF8Names bool
 
 	for _, f := range zr.File {
-		if !f.NonUTF8 { // From klauspost/compress/zip, true if UTF-8 flag is NOT set
-			continue // Skip if filename is already UTF-8
-		}
-
-		// For ZIP files, the standard states that when the UTF-8 flag is not set,
-		// filenames should be interpreted as CP437 (DOS encoding).
-		// We need to convert the filename back to raw bytes assuming CP437 encoding.
-		var nameBytes []byte
-
-		// Convert each character in the filename back to its CP437 byte representation.
-		// This simulates: Python's file_info.orig_filename.encode("cp437")
-		for _, r := range f.Name {
-			if r <= 0xFF { // CP437 is a single-byte encoding
-				nameBytes = append(nameBytes, byte(r))
-			} else {
-				// Something unexpected happened - the filename has characters outside CP437 range
-				// but wasn't flagged as UTF-8. Fall back to direct byte conversion.
-				nameBytes = []byte(f.Name)
-				break
-			}
-		}
-
-		if len(nameBytes) > 0 {
-			nonUTF8Names = append(nonUTF8Names, nameBytes)
-			allUTF8 = false
+		if f.NonUTF8 { // From klauspost/compress/zip, true if UTF-8 flag is NOT set
+			hasNonUTF8Names = true
+			break
 		}
 	}
 
 	// If all filenames are UTF-8, no need for special encoding
-	if allUTF8 || len(nonUTF8Names) == 0 {
+	if !hasNonUTF8Names {
 		return nil
 	}
 
-	// Concatenate filenames with spaces for analysis, like Python's b' '.join(namelist)
-	var concatBytes []byte
-	for i, name := range nonUTF8Names {
-		concatBytes = append(concatBytes, name...)
-		if i < len(nonUTF8Names)-1 {
-			concatBytes = append(concatBytes, ' ')
-		}
-	}
-
-	// Use chardet to detect the encoding
-	detectedEncoding, err := DetectEncoding(concatBytes)
-	if detectedEncoding != nil {
-		// Cache the result for future use
-		zipEncodingCache.Store(cacheKey, detectedEncoding)
-		return detectedEncoding
-	}
-
-	// Fall back to simple heuristics if chardet failed
-	var fallbackEncoding encoding.Encoding
-
-	// Check for Japanese Shift-JIS indicators (common in Japanese archives)
-	if bytes.Contains(concatBytes, []byte{0x82}) || bytes.Contains(concatBytes, []byte{0x83}) {
-		fallbackEncoding = japanese.ShiftJIS
-	} else if bytes.Contains(concatBytes, []byte{0xB0}) {
-		// Possible Korean EUC-KR
-		fallbackEncoding = korean.EUCKR
-	} else {
-		// Default to Shift-JIS as most common encoding for ZIP files with encoding issues
-		fallbackEncoding = japanese.ShiftJIS
-	}
+	// For non-UTF8 files, we default to Shift-JIS as most common encoding for ZIP files
+	// We don't try to analyze the bytes since we don't have access to the raw bytes
+	fallbackEncoding := japanese.ShiftJIS
 
 	// Cache the result for future use
 	zipEncodingCache.Store(cacheKey, fallbackEncoding)
