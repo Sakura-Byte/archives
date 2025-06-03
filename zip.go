@@ -136,8 +136,26 @@ func (z *Zip) AutoDetectEncoding(ctx context.Context, sr *io.SectionReader) enco
 			continue // Skip if filename is already UTF-8
 		}
 
-		// Collect non-UTF8 encoded filenames for analysis
-		nameBytes := []byte(f.Name)
+		// If NonUTF8 is true, f.Name from klauspost/compress/zip is the raw filename bytes
+		// interpreted as a string (each byte becomes a rune).
+		// We need to reconstruct the original raw bytes for chardet.
+		var currentFileOriginalBytes []byte
+		for _, r := range f.Name { // f.Name is string, r is rune
+			if r > 0xFF {
+				// This indicates that the assumption (f.Name is a string representation of 8-bit raw bytes)
+				// might be incorrect for this specific filename, or f.Name was processed differently
+				// by the underlying zip library than expected for a "NonUTF8" flagged name.
+				// As a fallback, use the current behavior for this name, though it's likely still
+				// not ideal for chardet. A log here could be useful for debugging such cases.
+				// log.Printf("Warning: NonUTF8 filename '%s' contains rune U+%04X > 0xFF. Byte reconstruction might be inaccurate.", f.Name, r)
+				currentFileOriginalBytes = []byte(f.Name)
+				break
+			}
+			currentFileOriginalBytes = append(currentFileOriginalBytes, byte(r))
+		}
+
+		nameBytes := currentFileOriginalBytes
+
 		if len(nameBytes) > 0 {
 			nonUTF8Names = append(nonUTF8Names, nameBytes)
 			allUTF8 = false
