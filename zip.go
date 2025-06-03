@@ -11,13 +11,20 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 
 	szip "github.com/STARRY-S/zip"
 	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/encoding/korean"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/traditionalchinese"
+	"golang.org/x/text/encoding/unicode"
 
 	"github.com/dsnet/compress/bzip2"
 	"github.com/klauspost/compress/zip"
 	"github.com/klauspost/compress/zstd"
+	"github.com/saintfish/chardet"
 	"github.com/ulikunitz/xz"
 )
 
@@ -57,6 +64,9 @@ func init() {
 		return io.NopCloser(xr)
 	})
 }
+
+// zipEncodingCache provides caching for ZIP file encoding detection
+var zipEncodingCache = sync.Map{}
 
 type Zip struct {
 	// Only compress files which are not already in a
@@ -102,6 +112,110 @@ func (z Zip) Match(_ context.Context, filename string, stream io.Reader) (MatchR
 	}
 
 	return mr, nil
+}
+
+// AutoDetectEncoding tries to detect the text encoding used in a ZIP file
+// by examining file names in the central directory. This avoids full extraction.
+func (z *Zip) AutoDetectEncoding(ctx context.Context, sr *io.SectionReader) encoding.Encoding {
+	// Check if we have a cached encoding
+	cacheKey := fmt.Sprintf("%p", sr)
+	if cachedEncoding, found := zipEncodingCache.Load(cacheKey); found {
+		if enc, ok := cachedEncoding.(encoding.Encoding); ok {
+			return enc
+		}
+	}
+
+	// Create a ZIP reader without fully extracting content
+	zr, err := zip.NewReader(sr, sr.Size())
+	if err != nil {
+		return nil
+	}
+
+	// Analyze filenames to detect encoding
+	var nonUTF8Names [][]byte
+	var allUTF8 = true
+
+	for _, f := range zr.File {
+		if !f.NonUTF8 {
+			continue // Skip if filename is already UTF-8
+		}
+
+		// Collect non-UTF8 encoded filenames for analysis
+		nameBytes := []byte(f.Name)
+		if len(nameBytes) > 0 {
+			nonUTF8Names = append(nonUTF8Names, nameBytes)
+			allUTF8 = false
+		}
+	}
+
+	// If all filenames are UTF-8, no need for special encoding
+	if allUTF8 || len(nonUTF8Names) == 0 {
+		return nil
+	}
+
+	// Concatenate filenames with spaces for analysis
+	var concatBytes []byte
+	for i, name := range nonUTF8Names {
+		concatBytes = append(concatBytes, name...)
+		if i < len(nonUTF8Names)-1 {
+			concatBytes = append(concatBytes, ' ')
+		}
+	}
+
+	// Use chardet to detect the encoding
+	var detectedEncoding encoding.Encoding
+
+	// Try with chardet library
+	detector := chardet.NewTextDetector()
+	if result, err := detector.DetectBest(concatBytes); err == nil {
+		// Map charset to encoding
+		switch strings.ToLower(result.Charset) {
+		case "shift_jis", "sjis":
+			detectedEncoding = japanese.ShiftJIS
+		case "euc-jp":
+			detectedEncoding = japanese.EUCJP
+		case "euc-kr":
+			detectedEncoding = korean.EUCKR
+		case "gb18030", "gbk", "gb2312":
+			detectedEncoding = simplifiedchinese.GBK
+		case "big5":
+			detectedEncoding = traditionalchinese.Big5
+		case "utf-16", "utf-16le":
+			detectedEncoding = unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM)
+		}
+
+		// Also check language info
+		if detectedEncoding == nil && result.Language != "" {
+			switch result.Language {
+			case "ja":
+				detectedEncoding = japanese.ShiftJIS
+			case "ko":
+				detectedEncoding = korean.EUCKR
+			case "zh":
+				detectedEncoding = simplifiedchinese.GBK
+			}
+		}
+	}
+
+	// Fall back to simple heuristics if chardet failed
+	if detectedEncoding == nil {
+		// Check for Japanese patterns
+		if bytes.Contains(concatBytes, []byte{0x82}) || bytes.Contains(concatBytes, []byte{0x83}) {
+			detectedEncoding = japanese.ShiftJIS
+		} else if bytes.Contains(concatBytes, []byte{0xB0}) {
+			detectedEncoding = korean.EUCKR
+		} else {
+			// Default to Shift-JIS as most common encoding for ZIP files with encoding issues
+			detectedEncoding = japanese.ShiftJIS
+		}
+	}
+
+	// Cache the result for future use
+	if detectedEncoding != nil {
+		zipEncodingCache.Store(cacheKey, detectedEncoding)
+	}
+
+	return detectedEncoding
 }
 
 func (z Zip) Archive(ctx context.Context, output io.Writer, files []FileInfo) error {
@@ -178,12 +292,8 @@ func (z Zip) archiveOneFile(ctx context.Context, zw *zip.Writer, idx int, file F
 	return nil
 }
 
-// Extract extracts files from z, implementing the Extractor interface. Uniquely, however,
-// sourceArchive must be an io.ReaderAt and io.Seeker, which are oddly disjoint interfaces
-// from io.Reader which is what the method signature requires. We chose this signature for
-// the interface because we figure you can Read() from anything you can ReadAt() or Seek()
-// with. Due to the nature of the zip archive format, if sourceArchive is not an io.Seeker
-// and io.ReaderAt, an error is returned.
+// Extract extracts files from z, implementing the Extractor interface.
+// The implementation is updated to auto-detect filename encoding if not specified.
 func (z Zip) Extract(ctx context.Context, sourceArchive io.Reader, handleFile FileHandler) error {
 	sra, ok := sourceArchive.(seekReaderAt)
 	if !ok {
@@ -193,6 +303,12 @@ func (z Zip) Extract(ctx context.Context, sourceArchive io.Reader, handleFile Fi
 	size, err := streamSizeBySeeking(sra)
 	if err != nil {
 		return fmt.Errorf("determining stream size: %w", err)
+	}
+
+	// Automatically detect encoding if none is specified
+	if z.TextEncoding == nil {
+		sr := io.NewSectionReader(sra, 0, size)
+		z.TextEncoding = z.AutoDetectEncoding(ctx, sr)
 	}
 
 	zr, err := zip.NewReader(sra, size)
@@ -208,7 +324,7 @@ func (z Zip) Extract(ctx context.Context, sourceArchive io.Reader, handleFile Fi
 			return err // honor context cancellation
 		}
 
-		// ensure filename and comment are UTF-8 encoded (issue #147 and PR #305)
+		// ensure filename and comment are UTF-8 encoded
 		z.decodeText(&f.FileHeader)
 
 		if fileIsIncluded(skipDirs, f.Name) {

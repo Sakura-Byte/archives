@@ -1,4 +1,4 @@
-module github.com/mholt/archives
+module github.com/Sakura-Byte/archives
 
 go 1.22.2
 
@@ -19,6 +19,7 @@ require (
 	github.com/bodgit/sevenzip v1.6.0
 	github.com/minio/minlz v1.0.0
 	github.com/pierrec/lz4/v4 v4.1.21
+	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
 	github.com/sorairolake/lzip-go v0.3.5
 	golang.org/x/text v0.20.0
 )

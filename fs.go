@@ -364,6 +364,9 @@ func (f ArchiveFS) Open(name string) (fs.File, error) {
 	var archiveFile *os.File
 	var err error
 	if f.Stream == nil {
+		if f.Path == "" {
+			return nil, fmt.Errorf("no input; one of Path or Stream must be set")
+		}
 		archiveFile, err = os.Open(f.Path)
 		if err != nil {
 			return nil, err
@@ -376,8 +379,6 @@ func (f ArchiveFS) Open(name string) (fs.File, error) {
 				archiveFile.Close()
 			}
 		}()
-	} else if f.Stream == nil {
-		return nil, fmt.Errorf("no input; one of Path or Stream must be set")
 	}
 
 	// handle special case of opening the archive root
