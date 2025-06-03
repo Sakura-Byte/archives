@@ -1,6 +1,8 @@
 package archives
 
 import (
+	"bytes"
+
 	"github.com/saintfish/chardet"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/japanese"
@@ -87,13 +89,72 @@ func DetectEncoding(data []byte) (encoding.Encoding, error) {
 
 	// Use chardet for encoding detection
 	detector := chardet.NewTextDetector()
+	// Note: chardet.Detector doesn't have an EnabledDetectors field, so we use default detectors
+
 	result, err := detector.DetectBest(data)
 	if err != nil {
 		return nil, err
 	}
 
+	// Log detection results for debugging (comment out in production)
+	// fmt.Printf("Detected encoding: %s, language: %s, confidence: %.2f%%\n",
+	//           result.Charset, result.Language, result.Confidence*100)
+
+	// If confidence is too low, try more aggressive detection
+	if float64(result.Confidence) < 0.7 {
+		// Try to identify based on specific byte patterns
+		if containsJapaneseBytes(data) {
+			return japanese.ShiftJIS, nil
+		} else if containsKoreanBytes(data) {
+			return korean.EUCKR, nil
+		} else if containsChineseBytes(data) {
+			return simplifiedchinese.GBK, nil
+		}
+	}
+
 	// Convert the detected charset to an encoding.Encoding
-	return GetEncodingFromCharset(result.Charset, result.Language), nil
+	enc := GetEncodingFromCharset(result.Charset, result.Language)
+	if enc != nil {
+		return enc, nil
+	}
+
+	// If we couldn't determine the encoding explicitly, try the fallbacks
+	for _, enc := range GetFallbackEncodings() {
+		// Try to decode a sample with this encoding
+		decoder := enc.NewDecoder()
+		_, err := decoder.Bytes(data)
+		if err == nil {
+			return enc, nil
+		}
+	}
+
+	// Default to ShiftJIS as most common problematic encoding in ZIP files
+	return japanese.ShiftJIS, nil
+}
+
+// containsJapaneseBytes checks for byte patterns common in Japanese encodings
+func containsJapaneseBytes(data []byte) bool {
+	// Common byte patterns in Shift-JIS
+	return bytes.Contains(data, []byte{0x82, 0xA0}) || // Hiragana markers
+		bytes.Contains(data, []byte{0x83, 0x40}) || // Katakana markers
+		bytes.Contains(data, []byte{0x82, 0x6A}) || // Kanji range markers
+		bytes.Contains(data, []byte{0x8A, 0xBF}) // More Kanji markers
+}
+
+// containsKoreanBytes checks for byte patterns common in Korean encodings
+func containsKoreanBytes(data []byte) bool {
+	// Common byte patterns in EUC-KR
+	return bytes.Contains(data, []byte{0xB0, 0xA1}) || // Hangul markers
+		bytes.Contains(data, []byte{0xB0, 0xFA}) ||
+		bytes.Contains(data, []byte{0xC7, 0xD1})
+}
+
+// containsChineseBytes checks for byte patterns common in Chinese encodings
+func containsChineseBytes(data []byte) bool {
+	// Common byte patterns in GBK
+	return bytes.Contains(data, []byte{0xD6, 0xD0}) || // Common Chinese characters
+		bytes.Contains(data, []byte{0xCE, 0xC4}) ||
+		bytes.Contains(data, []byte{0xD7, 0xD6})
 }
 
 // IsUTF8Filename checks if a filename in an archive uses UTF-8 encoding

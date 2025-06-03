@@ -132,29 +132,27 @@ func (z *Zip) AutoDetectEncoding(ctx context.Context, sr *io.SectionReader) enco
 	var allUTF8 = true
 
 	for _, f := range zr.File {
-		if !f.NonUTF8 {
+		if !f.NonUTF8 { // From klauspost/compress/zip, true if UTF-8 flag is NOT set
 			continue // Skip if filename is already UTF-8
 		}
 
-		// If NonUTF8 is true, f.Name from klauspost/compress/zip is the raw filename bytes
-		// interpreted as a string (each byte becomes a rune).
-		// We need to reconstruct the original raw bytes for chardet.
-		var currentFileOriginalBytes []byte
-		for _, r := range f.Name { // f.Name is string, r is rune
-			if r > 0xFF {
-				// This indicates that the assumption (f.Name is a string representation of 8-bit raw bytes)
-				// might be incorrect for this specific filename, or f.Name was processed differently
-				// by the underlying zip library than expected for a "NonUTF8" flagged name.
-				// As a fallback, use the current behavior for this name, though it's likely still
-				// not ideal for chardet. A log here could be useful for debugging such cases.
-				// log.Printf("Warning: NonUTF8 filename '%s' contains rune U+%04X > 0xFF. Byte reconstruction might be inaccurate.", f.Name, r)
-				currentFileOriginalBytes = []byte(f.Name)
+		// For ZIP files, the standard states that when the UTF-8 flag is not set,
+		// filenames should be interpreted as CP437 (DOS encoding).
+		// We need to convert the filename back to raw bytes assuming CP437 encoding.
+		var nameBytes []byte
+
+		// Convert each character in the filename back to its CP437 byte representation.
+		// This simulates: Python's file_info.orig_filename.encode("cp437")
+		for _, r := range f.Name {
+			if r <= 0xFF { // CP437 is a single-byte encoding
+				nameBytes = append(nameBytes, byte(r))
+			} else {
+				// Something unexpected happened - the filename has characters outside CP437 range
+				// but wasn't flagged as UTF-8. Fall back to direct byte conversion.
+				nameBytes = []byte(f.Name)
 				break
 			}
-			currentFileOriginalBytes = append(currentFileOriginalBytes, byte(r))
 		}
-
-		nameBytes := currentFileOriginalBytes
 
 		if len(nameBytes) > 0 {
 			nonUTF8Names = append(nonUTF8Names, nameBytes)
@@ -167,7 +165,7 @@ func (z *Zip) AutoDetectEncoding(ctx context.Context, sr *io.SectionReader) enco
 		return nil
 	}
 
-	// Concatenate filenames with spaces for analysis
+	// Concatenate filenames with spaces for analysis, like Python's b' '.join(namelist)
 	var concatBytes []byte
 	for i, name := range nonUTF8Names {
 		concatBytes = append(concatBytes, name...)
@@ -185,18 +183,22 @@ func (z *Zip) AutoDetectEncoding(ctx context.Context, sr *io.SectionReader) enco
 	}
 
 	// Fall back to simple heuristics if chardet failed
+	var fallbackEncoding encoding.Encoding
+
+	// Check for Japanese Shift-JIS indicators (common in Japanese archives)
 	if bytes.Contains(concatBytes, []byte{0x82}) || bytes.Contains(concatBytes, []byte{0x83}) {
-		detectedEncoding = japanese.ShiftJIS
+		fallbackEncoding = japanese.ShiftJIS
 	} else if bytes.Contains(concatBytes, []byte{0xB0}) {
-		detectedEncoding = korean.EUCKR
+		// Possible Korean EUC-KR
+		fallbackEncoding = korean.EUCKR
 	} else {
 		// Default to Shift-JIS as most common encoding for ZIP files with encoding issues
-		detectedEncoding = japanese.ShiftJIS
+		fallbackEncoding = japanese.ShiftJIS
 	}
 
 	// Cache the result for future use
-	zipEncodingCache.Store(cacheKey, detectedEncoding)
-	return detectedEncoding
+	zipEncodingCache.Store(cacheKey, fallbackEncoding)
+	return fallbackEncoding
 }
 
 func (z Zip) Archive(ctx context.Context, output io.Writer, files []FileInfo) error {
