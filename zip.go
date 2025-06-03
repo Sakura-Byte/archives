@@ -17,14 +17,10 @@ import (
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/japanese"
 	"golang.org/x/text/encoding/korean"
-	"golang.org/x/text/encoding/simplifiedchinese"
-	"golang.org/x/text/encoding/traditionalchinese"
-	"golang.org/x/text/encoding/unicode"
 
 	"github.com/dsnet/compress/bzip2"
 	"github.com/klauspost/compress/zip"
 	"github.com/klauspost/compress/zstd"
-	"github.com/saintfish/chardet"
 	"github.com/ulikunitz/xz"
 )
 
@@ -163,58 +159,25 @@ func (z *Zip) AutoDetectEncoding(ctx context.Context, sr *io.SectionReader) enco
 	}
 
 	// Use chardet to detect the encoding
-	var detectedEncoding encoding.Encoding
-
-	// Try with chardet library
-	detector := chardet.NewTextDetector()
-	if result, err := detector.DetectBest(concatBytes); err == nil {
-		// Map charset to encoding
-		switch strings.ToLower(result.Charset) {
-		case "shift_jis", "sjis":
-			detectedEncoding = japanese.ShiftJIS
-		case "euc-jp":
-			detectedEncoding = japanese.EUCJP
-		case "euc-kr":
-			detectedEncoding = korean.EUCKR
-		case "gb18030", "gbk", "gb2312":
-			detectedEncoding = simplifiedchinese.GBK
-		case "big5":
-			detectedEncoding = traditionalchinese.Big5
-		case "utf-16", "utf-16le":
-			detectedEncoding = unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM)
-		}
-
-		// Also check language info
-		if detectedEncoding == nil && result.Language != "" {
-			switch result.Language {
-			case "ja":
-				detectedEncoding = japanese.ShiftJIS
-			case "ko":
-				detectedEncoding = korean.EUCKR
-			case "zh":
-				detectedEncoding = simplifiedchinese.GBK
-			}
-		}
+	detectedEncoding, err := DetectEncoding(concatBytes)
+	if detectedEncoding != nil {
+		// Cache the result for future use
+		zipEncodingCache.Store(cacheKey, detectedEncoding)
+		return detectedEncoding
 	}
 
 	// Fall back to simple heuristics if chardet failed
-	if detectedEncoding == nil {
-		// Check for Japanese patterns
-		if bytes.Contains(concatBytes, []byte{0x82}) || bytes.Contains(concatBytes, []byte{0x83}) {
-			detectedEncoding = japanese.ShiftJIS
-		} else if bytes.Contains(concatBytes, []byte{0xB0}) {
-			detectedEncoding = korean.EUCKR
-		} else {
-			// Default to Shift-JIS as most common encoding for ZIP files with encoding issues
-			detectedEncoding = japanese.ShiftJIS
-		}
+	if bytes.Contains(concatBytes, []byte{0x82}) || bytes.Contains(concatBytes, []byte{0x83}) {
+		detectedEncoding = japanese.ShiftJIS
+	} else if bytes.Contains(concatBytes, []byte{0xB0}) {
+		detectedEncoding = korean.EUCKR
+	} else {
+		// Default to Shift-JIS as most common encoding for ZIP files with encoding issues
+		detectedEncoding = japanese.ShiftJIS
 	}
 
 	// Cache the result for future use
-	if detectedEncoding != nil {
-		zipEncodingCache.Store(cacheKey, detectedEncoding)
-	}
-
+	zipEncodingCache.Store(cacheKey, detectedEncoding)
 	return detectedEncoding
 }
 

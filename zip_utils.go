@@ -95,3 +95,28 @@ func DetectEncoding(data []byte) (encoding.Encoding, error) {
 	// Convert the detected charset to an encoding.Encoding
 	return GetEncodingFromCharset(result.Charset, result.Language), nil
 }
+
+// IsUTF8Filename checks if a filename in an archive uses UTF-8 encoding
+// This is specific to ZIP files, which have a flag bit for UTF-8
+func IsUTF8Filename(fileHeader interface{}) bool {
+	// Default to assuming UTF-8
+	isUTF8 := true
+
+	// Check for ZIP-specific header fields
+	if header, ok := fileHeader.(interface{ GetFlags() uint16 }); ok {
+		// Check if UTF-8 flag (0x800) is set in flag bits
+		isUTF8 = (header.GetFlags() & 0x800) != 0
+	} else if header, ok := fileHeader.(interface{ GetUTF8() bool }); ok {
+		// Some implementations might provide a direct method
+		isUTF8 = header.GetUTF8()
+	} else if m, ok := fileHeader.(map[string]interface{}); ok {
+		// Try to check a map-style header
+		if flags, ok := m["flags"].(uint16); ok {
+			isUTF8 = (flags & 0x800) != 0
+		} else if utf8Flag, ok := m["utf8"].(bool); ok {
+			isUTF8 = utf8Flag
+		}
+	}
+
+	return isUTF8
+}
